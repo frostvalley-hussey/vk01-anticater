@@ -65,13 +65,16 @@ enum AuxKey: String, Codable {
     // goes out as the legacy F15/F14 brightness keys, which macOS routes to
     // built-in and supported external displays alike; the External cases only
     // remain so configs from before the unification still decode.
+    // The symbolic hotkeys (AppleSymbolicHotKeys 53/54) are registered as
+    // F14/F15 + 0x800000 — real F-key presses carry that fn flag implicitly,
+    // so synthetic ones must set .maskSecondaryFn or they never match.
     func post() {
         switch self {
         case .volumeUp:       postAuxKey(NX_SOUND_UP)
         case .volumeDown:     postAuxKey(NX_SOUND_DOWN)
         case .mute:           postAuxKey(NX_MUTE)
-        case .brightnessUp, .brightnessUpExternal:     postKey(113)   // F15
-        case .brightnessDown, .brightnessDownExternal: postKey(107)   // F14
+        case .brightnessUp, .brightnessUpExternal:     postKey(113, flags: .maskSecondaryFn)   // F15
+        case .brightnessDown, .brightnessDownExternal: postKey(107, flags: .maskSecondaryFn)   // F14
         case .playPause:      postAuxKey(NX_PLAY)
         case .next:           postAuxKey(NX_NEXT)
         case .previous:       postAuxKey(NX_PREVIOUS)
