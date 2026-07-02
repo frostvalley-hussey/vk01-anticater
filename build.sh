@@ -17,7 +17,7 @@ cat > vk01d.app/Contents/Info.plist <<'EOF'
 </dict>
 </plist>
 EOF
-swiftc vk01d.swift -o vk01d.app/Contents/MacOS/vk01d
+swiftc vk01d.swift SettingsUI.swift -o vk01d.app/Contents/MacOS/vk01d
 # Prefer a stable Apple Development identity (keeps TCC grants across rebuilds); ad-hoc if none.
 identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')
 codesign --force --sign "${identity:--}" vk01d.app

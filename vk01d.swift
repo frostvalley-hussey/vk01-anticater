@@ -5,7 +5,8 @@
 // replicate the original POC — Layer 1 "Navigate": scroll / ⌘± zoom / ⌘↑→⌘0;
 // Layer 2 "Media": volume / brightness / mute.
 // Double-tap the knob button (or use the menu) to switch layers; the menu bar
-// icon (①/②) shows the current layer. Edit the JSON, then menu → Reload Config.
+// icon (①/②) shows the current layer. Configure via the Settings… window
+// (SettingsUI.swift, instant apply) or edit the JSON + menu → Reload Config.
 // Build the app bundle with ./build.sh, launch with `open vk01d.app`.
 // Needs Accessibility + Input Monitoring granted to vk01d (prompts on first run).
 
@@ -71,13 +72,13 @@ enum AuxKey: String, Codable {
 
 enum Action: Codable {
     case scroll(lines: Int32?)                    // nil → scrollLinesPerDetent
-    case keyChord(key: CGKeyCode, mods: [String])
+    case keyChord(key: CGKeyCode, mods: [String], label: String?) // label = display only
     case sequence(steps: [SeqStep])
     case aux(key: AuxKey)
     case launchApp(bundleId: String)
     case none
 
-    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId }
+    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId, label }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -87,7 +88,8 @@ enum Action: Codable {
             self = .scroll(lines: try c.decodeIfPresent(Int32.self, forKey: .lines))
         case "keyChord":
             self = .keyChord(key: try c.decode(CGKeyCode.self, forKey: .key),
-                             mods: try c.decodeIfPresent([String].self, forKey: .mods) ?? [])
+                             mods: try c.decodeIfPresent([String].self, forKey: .mods) ?? [],
+                             label: try c.decodeIfPresent(String.self, forKey: .label))
         case "sequence":
             self = .sequence(steps: try c.decode([SeqStep].self, forKey: .steps))
         case "aux":
@@ -108,10 +110,11 @@ enum Action: Codable {
         case .scroll(let lines):
             try c.encode("scroll", forKey: .type)
             try c.encodeIfPresent(lines, forKey: .lines)
-        case .keyChord(let key, let mods):
+        case .keyChord(let key, let mods, let label):
             try c.encode("keyChord", forKey: .type)
             try c.encode(key, forKey: .key)
             try c.encode(mods, forKey: .mods)
+            try c.encodeIfPresent(label, forKey: .label)
         case .sequence(let steps):
             try c.encode("sequence", forKey: .type)
             try c.encode(steps, forKey: .steps)
@@ -146,11 +149,22 @@ struct LayerConfig: Codable {
     }
 }
 
+// A recorded keyboard chord (the optional layer-switch hotkey). The label is
+// what the UI shows (e.g. "F6"); the engine matches on key + mods only.
+struct KeyChordSpec: Codable, Equatable {
+    var key: CGKeyCode
+    var mods: [String]
+    var label: String?
+}
+
 struct Config: Codable {
     var layers: [LayerConfig]
+    var doubleTapSwitch: Bool?         // default true; off → press acts instantly
     var doubleTapWindow: TimeInterval?
+    var layerHotkey: KeyChordSpec?     // optional keyboard chord that cycles layers
     var scrollLinesPerDetent: Int32?
 
+    var doubleTapEnabled: Bool { doubleTapSwitch ?? true }
     var tapWindow: TimeInterval { doubleTapWindow ?? 0.25 }
     var defaultScrollLines: Int32 { scrollLinesPerDetent ?? 3 }
 }
@@ -161,8 +175,8 @@ let defaultConfig = Config(
         LayerConfig(name: "Navigate",
                     twistL: .scroll(lines: 3),                        // scroll up
                     twistR: .scroll(lines: -3),                       // scroll down
-                    holdTwistL: .keyChord(key: 27, mods: ["cmd"]),    // ⌘− zoom out
-                    holdTwistR: .keyChord(key: 24, mods: ["cmd"]),    // ⌘= zoom in
+                    holdTwistL: .keyChord(key: 27, mods: ["cmd"], label: "−"), // ⌘− zoom out
+                    holdTwistR: .keyChord(key: 24, mods: ["cmd"], label: "="), // ⌘= zoom in
                     press: .sequence(steps: [
                         SeqStep(key: 126, mods: ["cmd"], delayMs: 50), // ⌘↑ (top), wait
                         SeqStep(key: 29, mods: ["cmd"], delayMs: nil), // ⌘0 (reset zoom)
@@ -174,7 +188,8 @@ let defaultConfig = Config(
                     holdTwistR: .aux(key: .brightnessUp),
                     press: .aux(key: .mute)),
     ],
-    doubleTapWindow: 0.25, scrollLinesPerDetent: 3)
+    doubleTapSwitch: true, doubleTapWindow: 0.25, layerHotkey: nil,
+    scrollLinesPerDetent: 3)
 
 // ---- config load/save ------------------------------------------------------
 
@@ -222,6 +237,25 @@ func loadConfig() {
         NSLog("vk01d: config load failed — keeping last good config: \(error)")
     }
     if layer > config.layers.count { layer = 1 }       // clamp after a reload
+}
+
+// Instant-apply path for the settings UI: swap the live config, persist it to
+// disk, and refresh the menu bar. Called on every edit in the Settings window.
+func applyConfig(_ newConfig: Config) {
+    config = newConfig
+    if layer > config.layers.count { layer = 1 }
+    do {
+        try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(config).write(to: configURL)
+        configError = nil
+    } catch {
+        NSLog("vk01d: config save failed: \(error)")
+    }
+    delegate.rebuildMenu()
+    updateUI()
 }
 
 // ---- state -----------------------------------------------------------------
@@ -317,7 +351,7 @@ func run(_ action: Action?) {
     switch action {
     case .scroll(let lines):
         postScroll(lines ?? config.defaultScrollLines)
-    case .keyChord(let key, let mods):
+    case .keyChord(let key, let mods, _):
         postKey(key, flags: modFlags(mods))
     case .sequence(let steps):
         var delay: TimeInterval = 0
@@ -354,6 +388,7 @@ func handle(_ code: Int64) {
         run(config.layers[layer - 1].action(for: g))
         return
     }
+    guard config.doubleTapEnabled else { runPress(); return }  // double-tap off → act instantly
     if pendingPress != nil {                                   // 2nd tap in window → next layer
         pendingPress?.cancel(); pendingPress = nil
         setLayer(layer % config.layers.count + 1)              // cycle (= toggle with 2 layers)
@@ -372,13 +407,21 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
         return Unmanaged.passUnretained(event)
     }
     let code = event.getIntegerValueField(.keyboardEventKeycode)
-    guard knobKeys.contains(code), event.flags.contains(requiredMods) else {
-        return Unmanaged.passUnretained(event)                 // not the knob — pass through
+    if knobKeys.contains(code), event.flags.contains(requiredMods) {
+        if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            DispatchQueue.main.async { handle(code) }
+        }
+        return nil                                             // swallow chord (down AND up)
     }
-    if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-        DispatchQueue.main.async { handle(code) }
+    // optional layer-switch hotkey (recorded in Settings; must carry modifiers)
+    if let hk = config.layerHotkey, !hk.mods.isEmpty, code == Int64(hk.key),
+       event.flags.contains(modFlags(hk.mods)) {
+        if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            DispatchQueue.main.async { setLayer(layer % config.layers.count + 1) }
+        }
+        return nil                                             // swallow (down AND up)
     }
-    return nil                                                 // swallow chord (down AND up)
+    return Unmanaged.passUnretained(event)                     // not ours — pass through
 }
 
 func startTap() {
@@ -428,6 +471,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             layerMenuItems.append(item); menu.addItem(item)
         }
         menu.addItem(.separator())
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings(_:)),
+                                  keyEquivalent: ",")
+        settings.target = self; menu.addItem(settings)
         let warn = NSMenuItem(title: "Config error — using last good config",
                               action: nil, keyEquivalent: "")
         warn.isEnabled = false             // info only; details in tooltip + Console
@@ -454,6 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func pickLayer(_ sender: NSMenuItem) { setLayer(sender.tag) }
 
     @objc func retryTap(_ sender: NSMenuItem) { startTap() }
+
+    @objc func openSettings(_ sender: NSMenuItem) { SettingsWindowController.show() }
 
     @objc func openConfig(_ sender: NSMenuItem) {
         if !FileManager.default.fileExists(atPath: configURL.path) { writeDefaultConfig() }
@@ -483,8 +531,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)   // menu bar only, no dock icon
 let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+
+// @main (not top-level statements) because the app is now two source files —
+// SettingsUI.swift holds the settings window.
+@main
+struct VK01D {
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)   // menu bar only, no dock icon
+        app.delegate = delegate
+        app.run()
+    }
+}
