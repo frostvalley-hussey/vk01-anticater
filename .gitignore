@@ -3,6 +3,7 @@ probe
 chordcheck
 vk01d
 vk01d.app/
+vk01d.zip
 *.o
 .build/
 
