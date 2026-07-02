@@ -47,7 +47,7 @@ func gesture(for code: Int64) -> Gesture? {
 //         doubleTapSwitch, doubleTapWindow, layerHotkey, layerHotkeyBack,
 //         scrollLinesPerDetent }
 // Each gesture slot is an action: scroll / keyChord / sequence / aux /
-// launchApp / none.
+// launchApp / openURL / openPath / none.
 
 struct SeqStep: Codable {
     var key: CGKeyCode? = nil    // CG virtual keycode to press…
@@ -88,9 +88,11 @@ enum Action: Codable {
     case sequence(steps: [SeqStep])
     case aux(key: AuxKey)
     case launchApp(bundleId: String)
+    case openURL(url: String)
+    case openPath(path: String)
     case none
 
-    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId, label }
+    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId, label, url, path }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -108,6 +110,10 @@ enum Action: Codable {
             self = .aux(key: try c.decode(AuxKey.self, forKey: .key))
         case "launchApp":
             self = .launchApp(bundleId: try c.decode(String.self, forKey: .bundleId))
+        case "openURL":
+            self = .openURL(url: try c.decode(String.self, forKey: .url))
+        case "openPath":
+            self = .openPath(path: try c.decode(String.self, forKey: .path))
         case "none":
             self = .none
         default:
@@ -136,6 +142,12 @@ enum Action: Codable {
         case .launchApp(let bundleId):
             try c.encode("launchApp", forKey: .type)
             try c.encode(bundleId, forKey: .bundleId)
+        case .openURL(let url):
+            try c.encode("openURL", forKey: .type)
+            try c.encode(url, forKey: .url)
+        case .openPath(let path):
+            try c.encode("openPath", forKey: .type)
+            try c.encode(path, forKey: .path)
         case .none:
             try c.encode("none", forKey: .type)
         }
@@ -390,6 +402,14 @@ func run(_ action: Action?) {
         } else {
             NSLog("vk01d: no app installed for bundle id \"\(bundleId)\"")
         }
+    case .openURL(let s):
+        if let url = URL(string: s), url.scheme != nil {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSLog("vk01d: openURL: \"\(s)\" is not a loadable URL")
+        }
+    case .openPath(let path):
+        NSWorkspace.shared.open(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
     case .none:
         break
     }

@@ -402,9 +402,9 @@ struct LayerDetail: View {
     }
 
     // Categorized action menu: None · Scroll ▸ · Media ▸ · Display ▸ · Web ▸ ·
-    // Apps ▸ · Custom ▸. The Pickers share one selection binding so the current
-    // choice keeps its checkmark; Web/Apps entries are conveniences that write
-    // a plain keystroke / app-launch action (shown as such once picked).
+    // Open ▸ · Custom ▸. The Pickers share one selection binding so the current
+    // choice keeps its checkmark; Web shortcut entries are conveniences that
+    // write a plain keystroke action (shown as such once picked).
     private func picker(_ g: Gesture) -> some View {
         Menu {
             Picker("", selection: preset(g)) {
@@ -440,13 +440,16 @@ struct LayerDetail: View {
                 Button("Back  ⌘[") { setChord(g, key: 33, label: "[") }
                 Button("Forward  ⌘]") { setChord(g, key: 30, label: "]") }
                 Button("Refresh  ⌘R") { setChord(g, key: 15, label: "R") }
+                Divider()
+                Button("Open Website…") { setAction(g, .openURL(url: "https://")) }
             }
-            Menu("Apps") {
+            Menu("Open") {
                 Button("Calculator") { setLaunch(g, "com.apple.calculator") }
                 Button("Mail") { setLaunch(g, "com.apple.mail") }
                 Button("Finder") { setLaunch(g, "com.apple.finder") }
                 Divider()
-                Button("Other…") { chooseApp(g) }
+                Button("Other App…") { chooseApp(g) }
+                Button("File or Folder…") { choosePath(g) }
             }
             Menu("Custom") {
                 Picker("", selection: preset(g)) {
@@ -472,6 +475,12 @@ struct LayerDetail: View {
             ChordRecorder(chord: chordBinding(g))
         case .launchApp(let bundleId)?:
             Text(appName(bundleId)).foregroundStyle(.secondary)
+        case .openURL?:
+            TextField("https://…", text: urlBinding(g))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 210)
+        case .openPath(let path)?:
+            Text(pathName(path)).foregroundStyle(.secondary).help(path)
         case .sequence(let steps)?:
             Button("\(steps.count) step\(steps.count == 1 ? "" : "s")…") { editingSequence = g }
                 .buttonStyle(.link)
@@ -495,6 +504,8 @@ struct LayerDetail: View {
         case .some(.sequence):       return "Sequence"
         case .some(.aux(let k)):     return auxTitles[k] ?? "Media"
         case .some(.launchApp):      return "Open App"
+        case .some(.openURL):        return "Website"
+        case .some(.openPath):       return "Open File"
         }
     }
 
@@ -510,6 +521,8 @@ struct LayerDetail: View {
                 case .some(.sequence):  return .sequence
                 case .some(.aux(let k)): return .aux(k.unified)
                 case .some(.launchApp): return .openApp
+                case .some(.openURL):   return .openURL
+                case .some(.openPath):  return .openPath
                 }
             },
             set: { p in
@@ -529,6 +542,11 @@ struct LayerDetail: View {
                     pendingKeystroke.insert(g)
                 case .openApp:
                     chooseApp(g)
+                case .openURL:
+                    if case .openURL? = store.cfg.layers[idx][g] { break }
+                    store.cfg.layers[idx][g] = .openURL(url: "https://")
+                case .openPath:
+                    choosePath(g)
                 case .sequence:
                     if case .sequence? = store.cfg.layers[idx][g] {} else {
                         store.cfg.layers[idx][g] = .sequence(steps: [])
@@ -546,6 +564,20 @@ struct LayerDetail: View {
     private func setLaunch(_ g: Gesture, _ bundleId: String) {
         pendingKeystroke.remove(g)
         store.cfg.layers[idx][g] = .launchApp(bundleId: bundleId)
+    }
+
+    private func setAction(_ g: Gesture, _ a: Action) {
+        pendingKeystroke.remove(g)
+        store.cfg.layers[idx][g] = a
+    }
+
+    private func urlBinding(_ g: Gesture) -> Binding<String> {
+        Binding(
+            get: {
+                if case .openURL(let u)? = store.cfg.layers[idx][g] { return u }
+                return ""
+            },
+            set: { store.cfg.layers[idx][g] = .openURL(url: $0) })
     }
 
     private func currentLines(_ g: Gesture) -> Int32 {
@@ -618,10 +650,25 @@ struct LayerDetail: View {
         }
         return bundleId
     }
+
+    private func choosePath(_ g: Gesture) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            pendingKeystroke.remove(g)
+            store.cfg.layers[idx][g] = .openPath(path: url.path)
+        }
+    }
+
+    private func pathName(_ path: String) -> String {
+        FileManager.default.displayName(atPath: (path as NSString).expandingTildeInPath)
+    }
 }
 
 enum Preset: Hashable {
-    case none, scrollUp, scrollDown, aux(AuxKey), keystroke, openApp, sequence
+    case none, scrollUp, scrollDown, aux(AuxKey), keystroke, openApp, sequence, openURL, openPath
 }
 
 // ---- sequence editor -------------------------------------------------------------
