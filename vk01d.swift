@@ -4,9 +4,10 @@
 // (written with defaults on first launch; schema in DESIGN.md). The defaults
 // replicate the original POC — Layer 1 "Navigate": scroll / ⌘± zoom / ⌘↑→⌘0;
 // Layer 2 "Media": volume / brightness / mute.
-// Double-tap the knob button (or use the menu) to switch layers; the menu bar
-// icon (①/②) shows the current layer. Configure via the Settings… window
-// (SettingsUI.swift, instant apply) or edit the JSON + menu → Reload Config.
+// Switch layers by double-tapping the knob, with recorded keyboard shortcuts,
+// or from the menu; the menu bar icon (①/②) shows the current layer.
+// Configure via the Settings… window (SettingsUI.swift, instant apply) or
+// edit the JSON + menu → Reload Config.
 // Build the app bundle with ./build.sh, launch with `open vk01d.app`.
 // Needs Accessibility + Input Monitoring granted to vk01d (prompts on first run).
 
@@ -43,29 +44,37 @@ func gesture(for code: Int64) -> Gesture? {
 
 // ---- config model ----------------------------------------------------------
 // JSON: { layers: [ { name, twistL, twistR, holdTwistL, holdTwistR, press } ],
-//         doubleTapWindow, scrollLinesPerDetent }
+//         doubleTapSwitch, doubleTapWindow, layerHotkey, layerHotkeyBack,
+//         scrollLinesPerDetent }
 // Each gesture slot is an action: scroll / keyChord / sequence / aux /
 // launchApp / none.
 
 struct SeqStep: Codable {
-    var key: CGKeyCode?      // CG virtual keycode to press…
-    var mods: [String]?      // …with these modifiers ("cmd" "shift" "opt" "ctrl" "fn")
-    var delayMs: Int?        // pause after this step (a step can also be delay-only)
+    var key: CGKeyCode? = nil    // CG virtual keycode to press…
+    var mods: [String]? = nil    // …with these modifiers ("cmd" "shift" "opt" "ctrl" "fn")
+    var delayMs: Int? = nil      // pause after this step (a step can also be delay-only)
+    var label: String? = nil     // display only (what the UI shows for the key)
 }
 
 enum AuxKey: String, Codable {
     case volumeUp, volumeDown, mute, brightnessUp, brightnessDown
+    case brightnessUpExternal, brightnessDownExternal   // legacy aliases of the pair above
     case playPause, next, previous
-    var nxCode: Int {
+
+    // Volume/media go out as NX aux events (system behavior + HUD). Brightness
+    // goes out as the legacy F15/F14 brightness keys, which macOS routes to
+    // built-in and supported external displays alike; the External cases only
+    // remain so configs from before the unification still decode.
+    func post() {
         switch self {
-        case .volumeUp:       return NX_SOUND_UP
-        case .volumeDown:     return NX_SOUND_DOWN
-        case .mute:           return NX_MUTE
-        case .brightnessUp:   return NX_BRIGHT_UP
-        case .brightnessDown: return NX_BRIGHT_DOWN
-        case .playPause:      return NX_PLAY
-        case .next:           return NX_NEXT
-        case .previous:       return NX_PREVIOUS
+        case .volumeUp:       postAuxKey(NX_SOUND_UP)
+        case .volumeDown:     postAuxKey(NX_SOUND_DOWN)
+        case .mute:           postAuxKey(NX_MUTE)
+        case .brightnessUp, .brightnessUpExternal:     postKey(113)   // F15
+        case .brightnessDown, .brightnessDownExternal: postKey(107)   // F14
+        case .playPause:      postAuxKey(NX_PLAY)
+        case .next:           postAuxKey(NX_NEXT)
+        case .previous:       postAuxKey(NX_PREVIOUS)
         }
     }
 }
@@ -149,7 +158,7 @@ struct LayerConfig: Codable {
     }
 }
 
-// A recorded keyboard chord (the optional layer-switch hotkey). The label is
+// A recorded keyboard chord (the optional layer-switch hotkeys). The label is
 // what the UI shows (e.g. "F6"); the engine matches on key + mods only.
 struct KeyChordSpec: Codable, Equatable {
     var key: CGKeyCode
@@ -161,7 +170,8 @@ struct Config: Codable {
     var layers: [LayerConfig]
     var doubleTapSwitch: Bool?         // default true; off → press acts instantly
     var doubleTapWindow: TimeInterval?
-    var layerHotkey: KeyChordSpec?     // optional keyboard chord that cycles layers
+    var layerHotkey: KeyChordSpec?     // optional keyboard chord → next layer
+    var layerHotkeyBack: KeyChordSpec? // optional keyboard chord → previous layer
     var scrollLinesPerDetent: Int32?
 
     var doubleTapEnabled: Bool { doubleTapSwitch ?? true }
@@ -179,7 +189,7 @@ let defaultConfig = Config(
                     holdTwistR: .keyChord(key: 24, mods: ["cmd"], label: "="), // ⌘= zoom in
                     press: .sequence(steps: [
                         SeqStep(key: 126, mods: ["cmd"], delayMs: 50), // ⌘↑ (top), wait
-                        SeqStep(key: 29, mods: ["cmd"], delayMs: nil), // ⌘0 (reset zoom)
+                        SeqStep(key: 29, mods: ["cmd"]),               // ⌘0 (reset zoom)
                     ])),
         LayerConfig(name: "Media",
                     twistL: .aux(key: .volumeDown),
@@ -188,7 +198,8 @@ let defaultConfig = Config(
                     holdTwistR: .aux(key: .brightnessUp),
                     press: .aux(key: .mute)),
     ],
-    doubleTapSwitch: true, doubleTapWindow: 0.25, layerHotkey: nil,
+    doubleTapSwitch: true, doubleTapWindow: 0.25,
+    layerHotkey: nil, layerHotkeyBack: nil,
     scrollLinesPerDetent: 3)
 
 // ---- config load/save ------------------------------------------------------
@@ -280,6 +291,12 @@ func setLayer(_ n: Int) {
     updateUI()
 }
 
+// Cycle the layer by ±1 with wraparound — the rolodex.
+func cycleLayer(_ delta: Int) {
+    let n = config.layers.count
+    setLayer(((layer - 1 + delta) % n + n) % n + 1)
+}
+
 func updateUI() {
     let symbol = tapPort == nil ? "exclamationmark.triangle.fill"
                : configError != nil ? "exclamationmark.circle"
@@ -310,10 +327,9 @@ func postKey(_ keycode: CGKeyCode, flags: CGEventFlags = []) {
     }
 }
 
-// NX_KEYTYPE_* aux keys (volume/brightness/mute) — systemDefined subtype-8 events;
+// NX_KEYTYPE_* aux keys (volume/mute/media) — systemDefined subtype-8 events;
 // these drive the real system behavior including the on-screen HUD.
 let NX_SOUND_UP = 0, NX_SOUND_DOWN = 1, NX_MUTE = 7
-let NX_BRIGHT_UP = 2, NX_BRIGHT_DOWN = 3
 let NX_PLAY = 16, NX_NEXT = 17, NX_PREVIOUS = 18
 
 func postAuxKey(_ key: Int) {
@@ -364,7 +380,7 @@ func run(_ action: Action?) {
             if let ms = step.delayMs { delay += TimeInterval(ms) / 1000 }
         }
     case .aux(let key):
-        postAuxKey(key.nxCode)
+        key.post()
     case .launchApp(let bundleId):
         if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
             NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
@@ -391,7 +407,7 @@ func handle(_ code: Int64) {
     guard config.doubleTapEnabled else { runPress(); return }  // double-tap off → act instantly
     if pendingPress != nil {                                   // 2nd tap in window → next layer
         pendingPress?.cancel(); pendingPress = nil
-        setLayer(layer % config.layers.count + 1)              // cycle (= toggle with 2 layers)
+        cycleLayer(1)                                          // cycle (= toggle with 2 layers)
     } else {
         let work = DispatchWorkItem { pendingPress = nil; runPress() }
         pendingPress = work
@@ -413,11 +429,12 @@ let callback: CGEventTapCallBack = { _, type, event, _ in
         }
         return nil                                             // swallow chord (down AND up)
     }
-    // optional layer-switch hotkey (recorded in Settings; must carry modifiers)
-    if let hk = config.layerHotkey, !hk.mods.isEmpty, code == Int64(hk.key),
-       event.flags.contains(modFlags(hk.mods)) {
+    // optional layer-switch hotkeys (recorded in Settings; must carry modifiers)
+    for (hk, delta) in [(config.layerHotkey, 1), (config.layerHotkeyBack, -1)] {
+        guard let hk, !hk.mods.isEmpty, code == Int64(hk.key),
+              event.flags.contains(modFlags(hk.mods)) else { continue }
         if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-            DispatchQueue.main.async { setLayer(layer % config.layers.count + 1) }
+            DispatchQueue.main.async { cycleLayer(delta) }
         }
         return nil                                             // swallow (down AND up)
     }
@@ -461,6 +478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Rebuilt from the config (layer names/count) on launch and on every reload.
+    // No key equivalents anywhere: in a menu-bar-only app they only fire while
+    // the menu is open, so showing them would advertise shortcuts that don't exist.
     func rebuildMenu() {
         menu.removeAllItems()
         layerMenuItems = []
@@ -472,7 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings(_:)),
-                                  keyEquivalent: ",")
+                                  keyEquivalent: "")
         settings.target = self; menu.addItem(settings)
         let warn = NSMenuItem(title: "Config error — using last good config",
                               action: nil, keyEquivalent: "")
@@ -493,7 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         retry.target = self; retryItem = retry; menu.addItem(retry)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit vk01d",
-                                action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+                                action: #selector(NSApplication.terminate(_:)), keyEquivalent: ""))
         updateLoginState()
     }
 

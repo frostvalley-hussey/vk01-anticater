@@ -1,6 +1,8 @@
 // SettingsUI.swift — the VK-01 settings window (SwiftUI, macOS 26 SDK).
-// System Settings idiom: sidebar (Layer Switching + layers, drag to reorder),
-// grouped Form detail with a clickable knob header, chord-recorder capsules.
+// Tab strip across the top: Switching, then one tab per layer (drag a tab to
+// reorder; right-click to move or delete it; + adds one). Grouped Form detail
+// with a clickable knob header and chord-recorder capsules; sequences open an
+// editor sheet; actions are picked from a categorized menu with submenus.
 // Instant apply: every change goes through applyConfig() — config.json is
 // written and the engine hot-reloads; there is no Save button.
 // Only system controls, system accent, SF Symbols — no hand-rolled materials.
@@ -17,7 +19,7 @@ enum SettingsWindowController {
     static func show() {
         ConfigStore.shared.syncFromEngine()
         if window == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 680),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
                              backing: .buffered, defer: false)
             w.title = "VK-01 Settings"
@@ -40,8 +42,14 @@ final class ConfigStore: ObservableObject {
     private var syncing = false
 
     @Published var cfg: Config = config {
-        didSet { if !syncing { applyConfig(cfg) } }
+        didSet {
+            if !syncing {
+                applyConfig(cfg)
+                lastSaved = Date()
+            }
+        }
     }
+    @Published var lastSaved: Date?   // drives the transient "Saved" badge
 
     func syncFromEngine() {
         syncing = true
@@ -73,7 +81,36 @@ extension KeyChordSpec {
         if mods.contains("opt")   { s += "⌥" }
         if mods.contains("shift") { s += "⇧" }
         if mods.contains("cmd")   { s += "⌘" }
-        return s + (label ?? "key \(key)")
+        return s + (label ?? specialKeyNames[key] ?? fallbackKeyNames[key] ?? "key \(key)")
+    }
+}
+
+extension Gesture: Identifiable {
+    var id: String { rawValue }
+}
+
+let gestureTitles: [Gesture: String] = [
+    .twistL: "Twist Left", .twistR: "Twist Right",
+    .holdTwistL: "Hold + Twist Left", .holdTwistR: "Hold + Twist Right",
+    .press: "Press",
+]
+
+let auxTitles: [AuxKey: String] = [
+    .volumeUp: "Volume Up", .volumeDown: "Volume Down", .mute: "Mute",
+    .playPause: "Play / Pause", .next: "Next Track", .previous: "Previous Track",
+    .brightnessUp: "Brightness Up", .brightnessDown: "Brightness Down",
+    .brightnessUpExternal: "Brightness Up", .brightnessDownExternal: "Brightness Down",
+]
+
+extension AuxKey {
+    // fold the legacy External aliases onto the unified brightness cases so the
+    // picker checkmark lands on the right entry for pre-unification configs
+    var unified: AuxKey {
+        switch self {
+        case .brightnessUpExternal:   return .brightnessUp
+        case .brightnessDownExternal: return .brightnessDown
+        default:                      return self
+        }
     }
 }
 
@@ -87,71 +124,115 @@ let specialKeyNames: [UInt16: String] = [
     107: "F14", 113: "F15", 106: "F16", 64: "F17", 79: "F18", 80: "F19", 90: "F20",
 ]
 
+// Fallbacks for keycodes stored without a display label (hand-written configs) —
+// only the digit row, which is stable across keyboard layouts.
+let fallbackKeyNames: [UInt16: String] = [
+    29: "0", 18: "1", 19: "2", 20: "3", 21: "4",
+    23: "5", 22: "6", 26: "7", 28: "8", 25: "9",
+]
+
 func keyLabel(_ e: NSEvent) -> String {
     if let s = specialKeyNames[e.keyCode] { return s }
     if let c = e.charactersIgnoringModifiers, !c.isEmpty { return c.uppercased() }
     return "key \(e.keyCode)"
 }
 
-// ---- root: sidebar + detail ------------------------------------------------------
+// ---- root: tab strip + detail ------------------------------------------------------
 
-enum SidebarSel: Hashable {
+enum TabSel: Hashable {
     case general
     case layer(Int)
 }
 
 struct SettingsRoot: View {
     @ObservedObject var store = ConfigStore.shared
-    @State private var sel: SidebarSel? = .general
+    @State private var sel: TabSel = .general
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $sel) {
-                Label("Layer Switching", systemImage: "arrow.triangle.2.circlepath")
-                    .tag(SidebarSel.general)
-                Section("Layers") {
-                    ForEach(Array(store.cfg.layers.enumerated()), id: \.offset) { i, l in
-                        Label(l.name, systemImage: "\(i + 1).circle")
-                            .tag(SidebarSel.layer(i))
-                    }
-                    .onMove { from, to in
-                        store.cfg.layers.move(fromOffsets: from, toOffset: to)
-                    }
+        VStack(spacing: 0) {
+            TabStrip(store: store, sel: $sel)
+            Divider()
+            Group {
+                switch sel {
+                case .layer(let i) where i < store.cfg.layers.count:
+                    LayerDetail(store: store, idx: i).id(i)
+                default:
+                    GeneralPane(store: store)
                 }
             }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-            .safeAreaInset(edge: .bottom) { addRemoveBar }
-        } detail: {
-            switch sel {
-            case .layer(let i) where i < store.cfg.layers.count:
-                LayerDetail(store: store, idx: i).id(i)
-            default:
-                GeneralPane(store: store)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(minWidth: 640, minHeight: 560)
+        .onChange(of: store.cfg.layers.count) { _, n in
+            // clamp after an external reload shrinks the layer list
+            if case .layer(let i) = sel, i >= n { sel = n > 0 ? .layer(n - 1) : .general }
+        }
+    }
+}
+
+// The horizontal layer bar: the Switching tab, a divider, a tab per layer, +.
+// Drag a layer tab to reorder; right-click for Move Left / Move Right / Delete.
+struct TabStrip: View {
+    @ObservedObject var store: ConfigStore
+    @Binding var sel: TabSel
+    @State private var dragging: Int?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Spacer(minLength: 0)
+            chip(.general) {
+                Label("Switching", systemImage: "arrow.triangle.2.circlepath")
             }
-        }
-        .frame(minWidth: 640, minHeight: 460)
-    }
-
-    private var addRemoveBar: some View {
-        HStack(spacing: 14) {
-            Button(action: addLayer) { Image(systemName: "plus") }
+            Divider()
+                .frame(height: 16)
+                .padding(.horizontal, 4)
+            ForEach(Array(store.cfg.layers.enumerated()), id: \.offset) { i, l in
+                chip(.layer(i)) {
+                    Text(l.name.isEmpty ? "Layer \(i + 1)" : l.name)
+                }
+                .onDrag {
+                    dragging = i
+                    return NSItemProvider(object: "vk01-layer-\(i)" as NSString)
+                }
+                .onDrop(of: [.text], delegate: TabDropDelegate(target: i, dragging: $dragging,
+                                                               store: store, sel: $sel))
+                .contextMenu {
+                    Button("Move Left") { move(i, by: -1) }
+                        .disabled(i == 0)
+                    Button("Move Right") { move(i, by: 1) }
+                        .disabled(i == store.cfg.layers.count - 1)
+                    Divider()
+                    Button("Delete Layer", role: .destructive) { remove(i) }
+                        .disabled(store.cfg.layers.count == 1)
+                }
+            }
+            Button(action: add) { Image(systemName: "plus") }
+                .buttonStyle(.borderless)
                 .help("Add a layer")
-            Button(action: removeLayer) { Image(systemName: "minus") }
-                .disabled(!canRemove)
-                .help("Remove the selected layer")
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.borderless)
-        .padding(8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(.bar)
+        .overlay(alignment: .trailing) {
+            SavedBadge(store: store)
+                .padding(.trailing, 12)
+        }
     }
 
-    private var canRemove: Bool {
-        if case .layer = sel { return store.cfg.layers.count > 1 }
-        return false
+    private func chip(_ tag: TabSel, @ViewBuilder label: () -> some View) -> some View {
+        Button { sel = tag } label: {
+            label()
+                .padding(.horizontal, 11)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(.quaternary).opacity(sel == tag ? 1 : 0))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(sel == tag ? .primary : .secondary)
     }
 
-    private func addLayer() {
+    private func add() {
         withAnimation {
             store.cfg.layers.append(LayerConfig(name: "Layer \(store.cfg.layers.count + 1)",
                                                 twistL: nil, twistR: nil,
@@ -160,13 +241,84 @@ struct SettingsRoot: View {
         }
     }
 
-    private func removeLayer() {
-        guard case .layer(let i) = sel, store.cfg.layers.count > 1,
-              i < store.cfg.layers.count else { return }
+    private func move(_ i: Int, by d: Int) {
+        let j = i + d
+        guard store.cfg.layers.indices.contains(j) else { return }
+        withAnimation {
+            store.cfg.layers.swapAt(i, j)
+            if sel == .layer(i) { sel = .layer(j) }
+            else if sel == .layer(j) { sel = .layer(i) }
+        }
+    }
+
+    private func remove(_ i: Int) {
+        guard store.cfg.layers.count > 1 else { return }
         withAnimation {
             store.cfg.layers.remove(at: i)
-            sel = .general
+            if case .layer(let s) = sel {
+                if s == i { sel = .layer(min(i, store.cfg.layers.count - 1)) }
+                else if s > i { sel = .layer(s - 1) }
+            }
         }
+    }
+}
+
+// Reorder-on-hover drop delegate for the layer tabs — the standard SwiftUI
+// horizontal-reorder pattern (the move happens as the drag passes over each
+// tab; the drop itself is a no-op).
+struct TabDropDelegate: DropDelegate {
+    let target: Int
+    @Binding var dragging: Int?
+    let store: ConfigStore
+    @Binding var sel: TabSel
+
+    func dropEntered(info: DropInfo) {
+        guard let from = dragging, from != target,
+              store.cfg.layers.indices.contains(from),
+              store.cfg.layers.indices.contains(target) else { return }
+        withAnimation {
+            store.cfg.layers.move(fromOffsets: IndexSet(integer: from),
+                                  toOffset: target > from ? target + 1 : target)
+            if case .layer(let s) = sel {                  // selection follows the layers
+                if s == from { sel = .layer(target) }
+                else if from < target, s > from, s <= target { sel = .layer(s - 1) }
+                else if target < from, s >= target, s < from { sel = .layer(s + 1) }
+            }
+        }
+        dragging = target
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragging = nil
+        return true
+    }
+}
+
+// Transient autosave indicator: fades in whenever an edit is written to
+// config.json and fades back out — feedback without a Save button.
+struct SavedBadge: View {
+    @ObservedObject var store: ConfigStore
+    @State private var visible = false
+    @State private var hide: DispatchWorkItem?
+
+    var body: some View {
+        Label("Saved", systemImage: "checkmark.circle.fill")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .opacity(visible ? 1 : 0)
+            .accessibilityHidden(!visible)
+            .onChange(of: store.lastSaved) { _, saved in
+                guard saved != nil else { return }
+                withAnimation(.easeIn(duration: 0.12)) { visible = true }
+                hide?.cancel()
+                let task = DispatchWorkItem {
+                    withAnimation(.easeOut(duration: 0.5)) { visible = false }
+                }
+                hide = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: task)
+            }
     }
 }
 
@@ -181,8 +333,12 @@ struct GeneralPane: View {
                 Toggle("Double-tap the knob to switch layers", isOn: Binding(
                     get: { store.cfg.doubleTapEnabled },
                     set: { store.cfg.doubleTapSwitch = $0 }))
-                LabeledContent("Keyboard shortcut") {
+                LabeledContent("Next layer") {
                     ChordRecorder(chord: $store.cfg.layerHotkey,
+                                  requireModifiers: true, clearable: true)
+                }
+                LabeledContent("Previous layer") {
+                    ChordRecorder(chord: $store.cfg.layerHotkeyBack,
                                   requireModifiers: true, clearable: true)
                 }
             } header: {
@@ -190,8 +346,9 @@ struct GeneralPane: View {
             } footer: {
                 Text("Double-tap waits \(Int(store.cfg.tapWindow * 1000)) ms before a single "
                    + "press acts. Turn it off for instant presses and switch layers with the "
-                   + "keyboard shortcut or the menu bar instead. The shortcut cycles "
-                   + "Layer 1 → 2 → … and needs at least one modifier key.")
+                   + "shortcuts or the menu bar instead. The shortcuts cycle through the "
+                   + "layers in a loop — with two layers either one toggles between them — "
+                   + "and need at least one modifier key.")
             }
         }
         .formStyle(.grouped)
@@ -205,6 +362,7 @@ struct LayerDetail: View {
     let idx: Int
     @State private var selected: Gesture?
     @State private var pendingKeystroke: Set<Gesture> = []
+    @State private var editingSequence: Gesture?
 
     var body: some View {
         if idx < store.cfg.layers.count {
@@ -218,19 +376,21 @@ struct LayerDetail: View {
                     TextField("Name", text: $store.cfg.layers[idx].name)
                 }
                 Section("Gestures") {
-                    row(.twistL, "Twist Left")
-                    row(.twistR, "Twist Right")
-                    row(.holdTwistL, "Hold + Twist Left")
-                    row(.holdTwistR, "Hold + Twist Right")
-                    row(.press, "Press")
+                    ForEach([Gesture.twistL, .twistR, .holdTwistL, .holdTwistR, .press]) { g in
+                        row(g)
+                    }
                 }
             }
             .formStyle(.grouped)
+            .sheet(item: $editingSequence) { g in
+                SequenceEditor(title: "\(gestureTitles[g] ?? g.rawValue) Sequence",
+                               steps: stepsBinding(g))
+            }
         }
     }
 
-    private func row(_ g: Gesture, _ title: String) -> some View {
-        LabeledContent(title) {
+    private func row(_ g: Gesture) -> some View {
+        LabeledContent(gestureTitles[g] ?? g.rawValue) {
             HStack(spacing: 10) {
                 params(g)
                 picker(g)
@@ -241,35 +401,63 @@ struct LayerDetail: View {
         .listRowBackground(selected == g ? Color.accentColor.opacity(0.10) : nil)
     }
 
-    // MECE action list: None · Scroll · Media · Display · Keystroke · App.
+    // Categorized action menu: None · Scroll ▸ · Media ▸ · Display ▸ · Web ▸ ·
+    // Apps ▸ · Custom ▸. The Pickers share one selection binding so the current
+    // choice keeps its checkmark; Web/Apps entries are conveniences that write
+    // a plain keystroke / app-launch action (shown as such once picked).
     private func picker(_ g: Gesture) -> some View {
-        Picker("", selection: preset(g)) {
-            Text("None").tag(Preset.none)
-            Section("Scroll") {
-                Text("Scroll Up").tag(Preset.scrollUp)
-                Text("Scroll Down").tag(Preset.scrollDown)
+        Menu {
+            Picker("", selection: preset(g)) {
+                Text("None").tag(Preset.none)
             }
-            Section("Media") {
-                Text("Volume Up").tag(Preset.aux(.volumeUp))
-                Text("Volume Down").tag(Preset.aux(.volumeDown))
-                Text("Mute").tag(Preset.aux(.mute))
-                Text("Play / Pause").tag(Preset.aux(.playPause))
-                Text("Next Track").tag(Preset.aux(.next))
-                Text("Previous Track").tag(Preset.aux(.previous))
-            }
-            Section("Display") {
-                Text("Brightness Up").tag(Preset.aux(.brightnessUp))
-                Text("Brightness Down").tag(Preset.aux(.brightnessDown))
-            }
-            Section("Custom") {
-                Text("Keystroke…").tag(Preset.keystroke)
-                Text("Open App…").tag(Preset.openApp)
-                if case .sequence? = store.cfg.layers[idx][g] {
-                    Text("Sequence").tag(Preset.sequence)
+            .pickerStyle(.inline).labelsHidden()
+            Menu("Scroll") {
+                Picker("", selection: preset(g)) {
+                    Text("Scroll Up").tag(Preset.scrollUp)
+                    Text("Scroll Down").tag(Preset.scrollDown)
                 }
+                .pickerStyle(.inline).labelsHidden()
             }
+            Menu("Media") {
+                Picker("", selection: preset(g)) {
+                    Text("Volume Up").tag(Preset.aux(.volumeUp))
+                    Text("Volume Down").tag(Preset.aux(.volumeDown))
+                    Text("Mute").tag(Preset.aux(.mute))
+                    Text("Play / Pause").tag(Preset.aux(.playPause))
+                    Text("Next Track").tag(Preset.aux(.next))
+                    Text("Previous Track").tag(Preset.aux(.previous))
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+            Menu("Display") {
+                Picker("", selection: preset(g)) {
+                    Text("Brightness Up").tag(Preset.aux(.brightnessUp))
+                    Text("Brightness Down").tag(Preset.aux(.brightnessDown))
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+            Menu("Web") {
+                Button("Back  ⌘[") { setChord(g, key: 33, label: "[") }
+                Button("Forward  ⌘]") { setChord(g, key: 30, label: "]") }
+                Button("Refresh  ⌘R") { setChord(g, key: 15, label: "R") }
+            }
+            Menu("Apps") {
+                Button("Calculator") { setLaunch(g, "com.apple.calculator") }
+                Button("Mail") { setLaunch(g, "com.apple.mail") }
+                Button("Finder") { setLaunch(g, "com.apple.finder") }
+                Divider()
+                Button("Other…") { chooseApp(g) }
+            }
+            Menu("Custom") {
+                Picker("", selection: preset(g)) {
+                    Text("Keystroke…").tag(Preset.keystroke)
+                    Text("Sequence…").tag(Preset.sequence)
+                }
+                .pickerStyle(.inline).labelsHidden()
+            }
+        } label: {
+            Text(currentTitle(g))
         }
-        .labelsHidden()
         .fixedSize()
     }
 
@@ -285,7 +473,9 @@ struct LayerDetail: View {
         case .launchApp(let bundleId)?:
             Text(appName(bundleId)).foregroundStyle(.secondary)
         case .sequence(let steps)?:
-            Text("\(steps.count) steps").foregroundStyle(.secondary)
+            Button("\(steps.count) step\(steps.count == 1 ? "" : "s")…") { editingSequence = g }
+                .buttonStyle(.link)
+                .help("Edit the sequence")
         default:
             if pendingKeystroke.contains(g) {
                 ChordRecorder(chord: chordBinding(g))
@@ -294,6 +484,19 @@ struct LayerDetail: View {
     }
 
     // ---- bindings ----
+
+    private func currentTitle(_ g: Gesture) -> String {
+        switch store.cfg.layers[idx][g] {
+        case nil, .some(.none):
+            return pendingKeystroke.contains(g) ? "Keystroke" : "None"
+        case .some(.scroll(let lines)):
+            return (lines ?? store.cfg.defaultScrollLines) >= 0 ? "Scroll Up" : "Scroll Down"
+        case .some(.keyChord):       return "Keystroke"
+        case .some(.sequence):       return "Sequence"
+        case .some(.aux(let k)):     return auxTitles[k] ?? "Media"
+        case .some(.launchApp):      return "Open App"
+        }
+    }
 
     private func preset(_ g: Gesture) -> Binding<Preset> {
         Binding(
@@ -305,7 +508,7 @@ struct LayerDetail: View {
                     return (lines ?? store.cfg.defaultScrollLines) >= 0 ? .scrollUp : .scrollDown
                 case .some(.keyChord):  return .keystroke
                 case .some(.sequence):  return .sequence
-                case .some(.aux(let k)): return .aux(k)
+                case .some(.aux(let k)): return .aux(k.unified)
                 case .some(.launchApp): return .openApp
                 }
             },
@@ -327,9 +530,22 @@ struct LayerDetail: View {
                 case .openApp:
                     chooseApp(g)
                 case .sequence:
-                    break                                  // preserved as-is
+                    if case .sequence? = store.cfg.layers[idx][g] {} else {
+                        store.cfg.layers[idx][g] = .sequence(steps: [])
+                    }
+                    editingSequence = g
                 }
             })
+    }
+
+    private func setChord(_ g: Gesture, key: CGKeyCode, label: String) {
+        pendingKeystroke.remove(g)
+        store.cfg.layers[idx][g] = .keyChord(key: key, mods: ["cmd"], label: label)
+    }
+
+    private func setLaunch(_ g: Gesture, _ bundleId: String) {
+        pendingKeystroke.remove(g)
+        store.cfg.layers[idx][g] = .launchApp(bundleId: bundleId)
     }
 
     private func currentLines(_ g: Gesture) -> Int32 {
@@ -363,6 +579,27 @@ struct LayerDetail: View {
             })
     }
 
+    // The editor sees atomic rows: combined key+delay steps are split into a
+    // keystroke row and a wait row (the engine treats both forms identically).
+    private func stepsBinding(_ g: Gesture) -> Binding<[SeqStep]> {
+        Binding(
+            get: {
+                guard case .sequence(let s)? = store.cfg.layers[idx][g] else { return [] }
+                var rows: [SeqStep] = []
+                for st in s {
+                    // key-less, delay-less steps are unrecorded keystroke rows — keep them
+                    if st.key != nil || st.delayMs == nil {
+                        rows.append(SeqStep(key: st.key, mods: st.mods, label: st.label))
+                    }
+                    if let ms = st.delayMs {
+                        rows.append(SeqStep(delayMs: ms))
+                    }
+                }
+                return rows
+            },
+            set: { store.cfg.layers[idx][g] = .sequence(steps: $0) })
+    }
+
     private func chooseApp(_ g: Gesture) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
@@ -385,6 +622,96 @@ struct LayerDetail: View {
 
 enum Preset: Hashable {
     case none, scrollUp, scrollDown, aux(AuxKey), keystroke, openApp, sequence
+}
+
+// ---- sequence editor -------------------------------------------------------------
+// Sheet listing a sequence's steps: keystroke rows (chord recorder) and wait
+// rows (milliseconds). Steps run top to bottom; drag rows to reorder.
+
+struct SequenceEditor: View {
+    let title: String
+    @Binding var steps: [SeqStep]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(title).font(.headline).padding(.top, 16)
+            Text("Steps run top to bottom — drag to reorder.")
+                .font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+            List {
+                ForEach(steps.indices, id: \.self) { i in
+                    stepRow(i)
+                }
+                .onMove { steps.move(fromOffsets: $0, toOffset: $1) }
+            }
+            .overlay {
+                if steps.isEmpty {
+                    Text("No steps yet — add a keystroke below.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Divider()
+            HStack {
+                Button { steps.append(SeqStep()) } label: {
+                    Label("Add Keystroke", systemImage: "keyboard")
+                }
+                Button { steps.append(SeqStep(delayMs: 100)) } label: {
+                    Label("Add Wait", systemImage: "clock")
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 440, height: 340)
+    }
+
+    @ViewBuilder
+    private func stepRow(_ i: Int) -> some View {
+        HStack(spacing: 8) {
+            if steps[i].key == nil, steps[i].delayMs != nil {
+                Image(systemName: "clock").foregroundStyle(.secondary)
+                Text("Wait")
+                TextField("ms", value: delayBinding(i), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 64)
+                Text("ms").foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "keyboard").foregroundStyle(.secondary)
+                ChordRecorder(chord: chordBinding(i))
+            }
+            Spacer()
+            Button { steps.remove(at: i) } label: {
+                Image(systemName: "minus.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.tertiary)
+            .help("Remove this step")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func chordBinding(_ i: Int) -> Binding<KeyChordSpec?> {
+        Binding(
+            get: {
+                guard steps.indices.contains(i), let k = steps[i].key else { return nil }
+                return KeyChordSpec(key: k, mods: steps[i].mods ?? [], label: steps[i].label)
+            },
+            set: { new in
+                guard steps.indices.contains(i), let n = new else { return }
+                steps[i].key = n.key
+                steps[i].mods = n.mods
+                steps[i].label = n.label
+            })
+    }
+
+    private func delayBinding(_ i: Int) -> Binding<Int> {
+        Binding(
+            get: { steps.indices.contains(i) ? steps[i].delayMs ?? 0 : 0 },
+            set: { if steps.indices.contains(i) { steps[i].delayMs = max(0, $0) } })
+    }
 }
 
 // ---- knob header ---------------------------------------------------------------
