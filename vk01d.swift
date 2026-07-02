@@ -47,7 +47,7 @@ func gesture(for code: Int64) -> Gesture? {
 //         doubleTapSwitch, doubleTapWindow, layerHotkey, layerHotkeyBack,
 //         scrollLinesPerDetent }
 // Each gesture slot is an action: scroll / keyChord / sequence / aux /
-// launchApp / openURL / openPath / none.
+// launchApp / openURL / openPath / quitApp / hotkeySwitch / none.
 
 struct SeqStep: Codable {
     var key: CGKeyCode? = nil    // CG virtual keycode to press…
@@ -90,9 +90,11 @@ enum Action: Codable {
     case launchApp(bundleId: String)
     case openURL(url: String)
     case openPath(path: String)
+    case quitApp(bundleId: String, force: Bool?)
+    case hotkeySwitch(first: KeyChordSpec?, second: KeyChordSpec?) // alternates per trigger
     case none
 
-    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId, label, url, path }
+    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId, label, url, path, force, first, second }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -114,6 +116,12 @@ enum Action: Codable {
             self = .openURL(url: try c.decode(String.self, forKey: .url))
         case "openPath":
             self = .openPath(path: try c.decode(String.self, forKey: .path))
+        case "quitApp":
+            self = .quitApp(bundleId: try c.decode(String.self, forKey: .bundleId),
+                            force: try c.decodeIfPresent(Bool.self, forKey: .force))
+        case "hotkeySwitch":
+            self = .hotkeySwitch(first: try c.decodeIfPresent(KeyChordSpec.self, forKey: .first),
+                                 second: try c.decodeIfPresent(KeyChordSpec.self, forKey: .second))
         case "none":
             self = .none
         default:
@@ -148,6 +156,14 @@ enum Action: Codable {
         case .openPath(let path):
             try c.encode("openPath", forKey: .type)
             try c.encode(path, forKey: .path)
+        case .quitApp(let bundleId, let force):
+            try c.encode("quitApp", forKey: .type)
+            try c.encode(bundleId, forKey: .bundleId)
+            try c.encodeIfPresent(force, forKey: .force)
+        case .hotkeySwitch(let first, let second):
+            try c.encode("hotkeySwitch", forKey: .type)
+            try c.encodeIfPresent(first, forKey: .first)
+            try c.encodeIfPresent(second, forKey: .second)
         case .none:
             try c.encode("none", forKey: .type)
         }
@@ -269,6 +285,7 @@ func loadConfig() {
 // disk, and refresh the menu bar. Called on every edit in the Settings window.
 func applyConfig(_ newConfig: Config) {
     config = newConfig
+    hotkeyToggleState.removeAll()
     if layer > config.layers.count { layer = 1 }
     do {
         try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(),
@@ -377,7 +394,11 @@ func modFlags(_ mods: [String]?) -> CGEventFlags {
     return f
 }
 
-func run(_ action: Action?) {
+// hotkeySwitch remembers which of its two chords fires next, per layer+gesture
+// slot. Reset whenever the config changes (bindings may have moved around).
+var hotkeyToggleState: [String: Bool] = [:]
+
+func run(_ action: Action?, stateKey: String = "") {
     guard let action else { return }
     switch action {
     case .scroll(let lines):
@@ -410,6 +431,20 @@ func run(_ action: Action?) {
         }
     case .openPath(let path):
         NSWorkspace.shared.open(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+    case .quitApp(let bundleId, let force):
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+        if apps.isEmpty { NSLog("vk01d: quitApp: \"\(bundleId)\" is not running") }
+        for app in apps { _ = (force ?? false) ? app.forceTerminate() : app.terminate() }
+    case .hotkeySwitch(let first, let second):
+        let useSecond = hotkeyToggleState[stateKey] ?? false
+        hotkeyToggleState[stateKey] = !useSecond
+        // fall back to whichever chord is recorded so a half-configured
+        // switch still does something sensible
+        if let chord = (useSecond ? second : first) ?? (useSecond ? first : second) {
+            postKey(chord.key, flags: modFlags(chord.mods))
+        } else {
+            NSLog("vk01d: hotkeySwitch: no hotkeys recorded")
+        }
     case .none:
         break
     }
@@ -417,14 +452,14 @@ func run(_ action: Action?) {
 
 func runPress() {
     log("L\(layer) press")
-    run(config.layers[layer - 1].press)
+    run(config.layers[layer - 1].press, stateKey: "L\(layer).press")
 }
 
 func handle(_ code: Int64) {
     guard let g = gesture(for: code) else { return }
     guard g == .press else {
         log("L\(layer) \(g.rawValue)")
-        run(config.layers[layer - 1].action(for: g))
+        run(config.layers[layer - 1].action(for: g), stateKey: "L\(layer).\(g.rawValue)")
         return
     }
     guard config.doubleTapEnabled else { runPress(); return }  // double-tap off → act instantly

@@ -450,10 +450,13 @@ struct LayerDetail: View {
                 Divider()
                 Button("Other App…") { chooseApp(g) }
                 Button("File or Folder…") { choosePath(g) }
+                Divider()
+                Button("Quit App…") { chooseApp(g) { .quitApp(bundleId: $0, force: nil) } }
             }
             Menu("Custom") {
                 Picker("", selection: preset(g)) {
                     Text("Keystroke…").tag(Preset.keystroke)
+                    Text("Hotkey Switch…").tag(Preset.hotkeySwitch)
                     Text("Sequence…").tag(Preset.sequence)
                 }
                 .pickerStyle(.inline).labelsHidden()
@@ -481,6 +484,15 @@ struct LayerDetail: View {
                 .frame(width: 210)
         case .openPath(let path)?:
             Text(pathName(path)).foregroundStyle(.secondary).help(path)
+        case .quitApp(let bundleId, _)?:
+            Text(appName(bundleId)).foregroundStyle(.secondary)
+            Toggle("Force", isOn: forceBinding(g))
+                .toggleStyle(.checkbox)
+                .help("Force quit — unsaved changes are lost")
+        case .hotkeySwitch?:
+            ChordRecorder(chord: switchChordBinding(g, second: false))
+            Text("⇄").foregroundStyle(.secondary)
+            ChordRecorder(chord: switchChordBinding(g, second: true))
         case .sequence(let steps)?:
             Button("\(steps.count) step\(steps.count == 1 ? "" : "s")…") { editingSequence = g }
                 .buttonStyle(.link)
@@ -506,6 +518,8 @@ struct LayerDetail: View {
         case .some(.launchApp):      return "Open App"
         case .some(.openURL):        return "Website"
         case .some(.openPath):       return "Open File"
+        case .some(.quitApp):        return "Quit App"
+        case .some(.hotkeySwitch):   return "Hotkey Switch"
         }
     }
 
@@ -523,6 +537,8 @@ struct LayerDetail: View {
                 case .some(.launchApp): return .openApp
                 case .some(.openURL):   return .openURL
                 case .some(.openPath):  return .openPath
+                case .some(.quitApp):   return .quitApp
+                case .some(.hotkeySwitch): return .hotkeySwitch
                 }
             },
             set: { p in
@@ -547,6 +563,11 @@ struct LayerDetail: View {
                     store.cfg.layers[idx][g] = .openURL(url: "https://")
                 case .openPath:
                     choosePath(g)
+                case .quitApp:
+                    chooseApp(g) { .quitApp(bundleId: $0, force: nil) }
+                case .hotkeySwitch:
+                    if case .hotkeySwitch? = store.cfg.layers[idx][g] { break }
+                    store.cfg.layers[idx][g] = .hotkeySwitch(first: nil, second: nil)
                 case .sequence:
                     if case .sequence? = store.cfg.layers[idx][g] {} else {
                         store.cfg.layers[idx][g] = .sequence(steps: [])
@@ -632,7 +653,8 @@ struct LayerDetail: View {
             set: { store.cfg.layers[idx][g] = .sequence(steps: $0) })
     }
 
-    private func chooseApp(_ g: Gesture) {
+    private func chooseApp(_ g: Gesture,
+                           make: (String) -> Action = { .launchApp(bundleId: $0) }) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
@@ -640,8 +662,38 @@ struct LayerDetail: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url,
            let bundleId = Bundle(url: url)?.bundleIdentifier {
-            store.cfg.layers[idx][g] = .launchApp(bundleId: bundleId)
+            pendingKeystroke.remove(g)
+            store.cfg.layers[idx][g] = make(bundleId)
         }
+    }
+
+    private func forceBinding(_ g: Gesture) -> Binding<Bool> {
+        Binding(
+            get: {
+                if case .quitApp(_, let f)? = store.cfg.layers[idx][g] { return f ?? false }
+                return false
+            },
+            set: { v in
+                if case .quitApp(let b, _)? = store.cfg.layers[idx][g] {
+                    store.cfg.layers[idx][g] = .quitApp(bundleId: b, force: v)
+                }
+            })
+    }
+
+    private func switchChordBinding(_ g: Gesture, second: Bool) -> Binding<KeyChordSpec?> {
+        Binding(
+            get: {
+                if case .hotkeySwitch(let f, let s)? = store.cfg.layers[idx][g] {
+                    return second ? s : f
+                }
+                return nil
+            },
+            set: { new in
+                guard let n = new,
+                      case .hotkeySwitch(let f, let s)? = store.cfg.layers[idx][g] else { return }
+                store.cfg.layers[idx][g] = .hotkeySwitch(first: second ? f : n,
+                                                         second: second ? n : s)
+            })
     }
 
     private func appName(_ bundleId: String) -> String {
@@ -668,7 +720,8 @@ struct LayerDetail: View {
 }
 
 enum Preset: Hashable {
-    case none, scrollUp, scrollDown, aux(AuxKey), keystroke, openApp, sequence, openURL, openPath
+    case none, scrollUp, scrollDown, aux(AuxKey), keystroke, openApp, sequence, openURL, openPath,
+         quitApp, hotkeySwitch
 }
 
 // ---- sequence editor -------------------------------------------------------------
