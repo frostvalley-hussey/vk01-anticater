@@ -1,0 +1,10 @@
+# compiled Swift binaries
+probe
+*.o
+.build/
+
+# probe run logs (regenerable)
+probe-*.log
+
+# macOS cruft
+.DS_Store
