@@ -42,8 +42,9 @@ func gesture(for code: Int64) -> Gesture? {
 
 // ---- config model ----------------------------------------------------------
 // JSON: { layers: [ { name, twistL, twistR, holdTwistL, holdTwistR, press } ],
-//         layerSwitch, doubleTapWindow, scrollLinesPerDetent }
-// Each gesture slot is an action: scroll / keyChord / sequence / aux / none.
+//         doubleTapWindow, scrollLinesPerDetent }
+// Each gesture slot is an action: scroll / keyChord / sequence / aux /
+// launchApp / none.
 
 struct SeqStep: Codable {
     var key: CGKeyCode?      // CG virtual keycode to press…
@@ -53,6 +54,7 @@ struct SeqStep: Codable {
 
 enum AuxKey: String, Codable {
     case volumeUp, volumeDown, mute, brightnessUp, brightnessDown
+    case playPause, next, previous
     var nxCode: Int {
         switch self {
         case .volumeUp:       return NX_SOUND_UP
@@ -60,6 +62,9 @@ enum AuxKey: String, Codable {
         case .mute:           return NX_MUTE
         case .brightnessUp:   return NX_BRIGHT_UP
         case .brightnessDown: return NX_BRIGHT_DOWN
+        case .playPause:      return NX_PLAY
+        case .next:           return NX_NEXT
+        case .previous:       return NX_PREVIOUS
         }
     }
 }
@@ -69,9 +74,10 @@ enum Action: Codable {
     case keyChord(key: CGKeyCode, mods: [String])
     case sequence(steps: [SeqStep])
     case aux(key: AuxKey)
+    case launchApp(bundleId: String)
     case none
 
-    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps }
+    private enum CodingKeys: String, CodingKey { case type, lines, key, mods, steps, bundleId }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -86,6 +92,8 @@ enum Action: Codable {
             self = .sequence(steps: try c.decode([SeqStep].self, forKey: .steps))
         case "aux":
             self = .aux(key: try c.decode(AuxKey.self, forKey: .key))
+        case "launchApp":
+            self = .launchApp(bundleId: try c.decode(String.self, forKey: .bundleId))
         case "none":
             self = .none
         default:
@@ -110,6 +118,9 @@ enum Action: Codable {
         case .aux(let key):
             try c.encode("aux", forKey: .type)
             try c.encode(key, forKey: .key)
+        case .launchApp(let bundleId):
+            try c.encode("launchApp", forKey: .type)
+            try c.encode(bundleId, forKey: .bundleId)
         case .none:
             try c.encode("none", forKey: .type)
         }
@@ -137,7 +148,6 @@ struct LayerConfig: Codable {
 
 struct Config: Codable {
     var layers: [LayerConfig]
-    var layerSwitch: String?           // only "doubleTap" until milestone 2
     var doubleTapWindow: TimeInterval?
     var scrollLinesPerDetent: Int32?
 
@@ -164,7 +174,7 @@ let defaultConfig = Config(
                     holdTwistR: .aux(key: .brightnessUp),
                     press: .aux(key: .mute)),
     ],
-    layerSwitch: "doubleTap", doubleTapWindow: 0.25, scrollLinesPerDetent: 3)
+    doubleTapWindow: 0.25, scrollLinesPerDetent: 3)
 
 // ---- config load/save ------------------------------------------------------
 
@@ -207,9 +217,6 @@ func loadConfig() {
         guard !parsed.layers.isEmpty else { throw ConfigError(msg: "config has no layers") }
         config = parsed
         configError = nil
-        if let mode = parsed.layerSwitch, mode != "doubleTap" {
-            NSLog("vk01d: layerSwitch \"\(mode)\" not implemented yet — using doubleTap")
-        }
     } catch {
         configError = String(describing: error)
         NSLog("vk01d: config load failed — keeping last good config: \(error)")
@@ -220,7 +227,7 @@ func loadConfig() {
 // ---- state -----------------------------------------------------------------
 
 var layer = 1
-var pendingPress: DispatchWorkItem?
+var pendingPress: DispatchWorkItem?   // armed single press (double-tap window)
 var tapPort: CFMachPort?
 
 func log(_ s: String) { if verbose { print(s) } }
@@ -273,6 +280,7 @@ func postKey(_ keycode: CGKeyCode, flags: CGEventFlags = []) {
 // these drive the real system behavior including the on-screen HUD.
 let NX_SOUND_UP = 0, NX_SOUND_DOWN = 1, NX_MUTE = 7
 let NX_BRIGHT_UP = 2, NX_BRIGHT_DOWN = 3
+let NX_PLAY = 16, NX_NEXT = 17, NX_PREVIOUS = 18
 
 func postAuxKey(_ key: Int) {
     for down in [true, false] {
@@ -323,29 +331,36 @@ func run(_ action: Action?) {
         }
     case .aux(let key):
         postAuxKey(key.nxCode)
+    case .launchApp(let bundleId):
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        } else {
+            NSLog("vk01d: no app installed for bundle id \"\(bundleId)\"")
+        }
     case .none:
         break
     }
 }
 
+func runPress() {
+    log("L\(layer) press")
+    run(config.layers[layer - 1].press)
+}
+
 func handle(_ code: Int64) {
     guard let g = gesture(for: code) else { return }
-    if g == .press {
-        if pendingPress != nil {                               // 2nd tap in window → next layer
-            pendingPress?.cancel(); pendingPress = nil
-            setLayer(layer % config.layers.count + 1)          // cycle (= toggle with 2 layers)
-        } else {
-            let work = DispatchWorkItem {
-                pendingPress = nil
-                log("L\(layer) press")
-                run(config.layers[layer - 1].press)
-            }
-            pendingPress = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + config.tapWindow, execute: work)
-        }
-    } else {
+    guard g == .press else {
         log("L\(layer) \(g.rawValue)")
         run(config.layers[layer - 1].action(for: g))
+        return
+    }
+    if pendingPress != nil {                                   // 2nd tap in window → next layer
+        pendingPress?.cancel(); pendingPress = nil
+        setLayer(layer % config.layers.count + 1)              // cycle (= toggle with 2 layers)
+    } else {
+        let work = DispatchWorkItem { pendingPress = nil; runPress() }
+        pendingPress = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + config.tapWindow, execute: work)
     }
 }
 
