@@ -81,9 +81,32 @@ replicates the POC behavior exactly.
    parameter fields. The main build item is a **key-chord recorder** field ("click,
    then press a shortcut") for `keyChord`/`sequence` — capture the next keyDown via a
    local NSEvent monitor. Writes to the same config.json, engine reloads on save.
+   Must follow the "Settings UI design language" section below.
 4. **Polish (optional).** Per-app overrides (frontmost-app bundle id → layer/action
    overrides via `NSWorkspace` notifications), preset import/export, editable layer
    names in the UI.
+
+## Settings UI design language
+
+Target feel: indistinguishable from a pane Apple shipped in System Settings on
+macOS 26 (Tahoe) — Liquid Glass, minimal, with one tasteful skeuomorphic touch.
+
+- **Build against the macOS 26 SDK.** Standard SwiftUI controls adopt Liquid Glass
+  automatically. Never hand-roll materials, colors, or fonts: system controls,
+  system accent color, SF Symbols only. "Apple-built" comes from restraint.
+- **Structure = System Settings idiom:** `Form` + `.formStyle(.grouped)`,
+  `LabeledContent` rows, a segmented or sidebar layer picker.
+- **Glass is for the floating layer, not content** (Apple's own guidance): apply
+  `.glassEffect()` / `GlassEffectContainer` sparingly — the gesture-picker overlay,
+  the chord-recorder capsule — never slathered over whole panes.
+- **Skeuomorphic centerpiece:** a rendered VK-01 knob as the pane header; click a
+  gesture zone (twist arrows, crown press, hold+twist) to select and edit it —
+  the way Apple's Trackpad pane illustrates each gesture. Selected zone glows
+  with the accent color; the action editor appears beneath.
+- **Chord recorder** styled after System Settings → Keyboard Shortcuts: a capsule
+  showing glyphs (⌃⌥F16), click to arm, Esc to cancel.
+- Free wins to preserve by using only system controls: dark/light appearance,
+  vibrancy, Dynamic Type, VoiceOver, reduced-transparency mode.
 
 ## Gotchas the implementation must respect
 
