@@ -1,5 +1,8 @@
 # compiled Swift binaries
 probe
+chordcheck
+vk01d
+vk01d.app/
 *.o
 .build/
 
