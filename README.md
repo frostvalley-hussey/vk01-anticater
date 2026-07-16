@@ -22,8 +22,9 @@ actions in their place. No firmware replacement.
 - `chordcheck.swift` — tiny tap logger used to verify what the knob actually sends.
 - `probe.swift` — read-only IOKit probe for the vendor HID config interface.
   Build: `swiftc probe.swift -o probe`, run `./probe`.
-- `mac.EN/Mac.pkg` — vendor macOS app (reference / config-protocol source; re-extract with
-  `pkgutil --expand`). `mac.EN/User Manual.pdf` — vendor manual.
+- `mac.EN/` — vendor's macOS app + manual (config-protocol reference). Not included in this
+  repo (proprietary, ours to use but not to redistribute) — get it from the vendor and drop
+  it in `mac.EN/` locally if you want to re-extract with `pkgutil --expand`.
 - `DESIGN.md` — design document (architecture, config schema, action vocabulary, UI language).
 
 ## How it works

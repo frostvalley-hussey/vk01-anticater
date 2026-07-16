@@ -7,6 +7,9 @@ vk01d.zip
 *.o
 .build/
 
+# vendor macOS app + manual (proprietary, not ours to redistribute)
+mac.EN/
+
 # probe run logs (regenerable)
 probe-*.log
 
