@@ -19,7 +19,9 @@ cat > vk01d.app/Contents/Info.plist <<'EOF'
 EOF
 swiftc vk01d.swift SettingsUI.swift -o vk01d.app/Contents/MacOS/vk01d
 # Prefer a stable Apple Development identity (keeps TCC grants across rebuilds); ad-hoc if none.
-identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ {print $2; exit}')
+# Skip identities with trust errors (e.g. CSSMERR_TP_CERT_REVOKED) — signing with a
+# revoked cert makes Gatekeeper flag the app as malware.
+identity=$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/ && !/CSSMERR/ {print $2; exit}')
 codesign --force --sign "${identity:--}" vk01d.app
 echo "Signed as: ${identity:-ad-hoc}"
 echo "Built vk01d.app — launch with: open vk01d.app"
